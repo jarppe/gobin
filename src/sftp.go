@@ -6,27 +6,29 @@ import (
 	"sync"
 )
 
-func sftp(wg *sync.WaitGroup, config Config, changeCh <-chan Change, exitCh <-chan bool) {
+func sftp(wg *sync.WaitGroup, config Config, changeCh <-chan Change) {
 	defer wg.Done()
 
 	client, err := goph.New(config.user, config.hostname, goph.Key(config.identityfile, ""))
 	if err != nil {
 		log.Fatalf("can't connect %s:%s: %s", config.user, config.hostname, err.Error())
 	}
-	defer client.Close()
 
-	for {
-		select {
-		case change := <-changeCh:
-			handleChange(client, change)
+	for change := range changeCh {
+		handleChange(client, change)
+	}
 
-		case _ = <-exitCh:
-			log.Printf("sftp: closing...")
-			return
-		}
+	log.Printf("sftp: closing...")
+
+	err = client.Close()
+	if err != nil {
+		log.Printf("sftp: error while closing SSH client: %s", err.Error())
 	}
 }
 
 func handleChange(client *goph.Client, change Change) {
-	log.Printf("handleChange: %q", change)
+	log.Printf("handleChange:")
+	for _, file := range change.Files {
+		log.Printf("   [%s] (%s)", file.Name, file.Type)
+	}
 }

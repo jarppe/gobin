@@ -5,9 +5,28 @@ import (
 	"encoding/json"
 	"log"
 	"net"
+	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 )
+
+type Change struct {
+	Version         string
+	Clock           string
+	Files           []File
+	Root            string
+	Subscription    string
+	Unilateral      bool
+}
+
+type File struct {
+	Mode   int
+	Exists bool
+	Size   int
+	Type   string
+	Name   string
+}
 
 func watchman(wg *sync.WaitGroup, config Config, changeCh chan<- Change, exitCh <-chan bool) {
 	defer wg.Done()
@@ -17,47 +36,35 @@ func watchman(wg *sync.WaitGroup, config Config, changeCh chan<- Change, exitCh 
 	if err != nil {
 		log.Fatalf("can't get watchman socket name, have you installed Watchman? (https://facebook.github.io/watchman/)")
 	}
-
-	type SocketName struct {
+	var socketName struct {
 		Version  string
 		Sockname string
 	}
+	parse(out, &socketName)
 
-	var socketName SocketName
-	err = json.Unmarshal(out, &socketName)
-	if err != nil {
-		log.Fatalf("can't parse watchman socket response")
-	}
+	watchman := MakeWatchman(socketName.Sockname)
+	defer watchman.Close()
 
-	watchman := MakeWatchman(socketName.Sockname, changeCh)
+	watchman.subscribe(config.source)
+	watchman.listenChanges(changeCh)
 
-	watchProjectResp := watchman.watchProject(config.source)
-
-	log.Printf("watching successfully, watch = %q relp = %q", watchProjectResp.Watch, watchProjectResp.RelativePath)
-
+	log.Printf("gobin: Ready")
 	<-exitCh
-	log.Printf("watchman closing...")
 }
 
-func (watchman *Watchman) watchProject(dirName string) *WatchProjectResp {
-	watchProjectResp := &WatchProjectResp{}
-	watchman.sendCommand([]string{"watch-project", dirName}, watchProjectResp)
-	return watchProjectResp
+type Watchman struct {
+	socket net.Conn
+
+	writer  *bufio.Writer
+	encoder *json.Encoder
+
+	reader  *bufio.Reader
+	scanner *bufio.Scanner
+
+	subscription string
 }
 
-func (watchman *Watchman) sendCommand(req interface{}, resp interface{}) {
-	watchman.encoder.Encode(req)
-	watchman.writer.Flush()
-
-	watchman.scanner.Scan()
-	err := json.Unmarshal([]byte(watchman.scanner.Text()), resp)
-	if err != nil {
-		log.Fatalf("can't parse watch-project command response: %q", watchman.scanner.Text())
-	}
-}
-
-
-func MakeWatchman(socketName string, changeCh chan<- Change) *Watchman {
+func MakeWatchman(socketName string) *Watchman {
 	socket, err := net.Dial("unix", socketName)
 	if err != nil {
 		log.Fatalf("can't open Watchman socket %s: %s", socketName, err.Error())
@@ -75,56 +82,77 @@ func MakeWatchman(socketName string, changeCh chan<- Change) *Watchman {
 		encoder,
 		reader,
 		scanner,
-		changeCh,
+		"gobin:" + strconv.Itoa(os.Getpid()),
 	}
 }
 
-type Watchman struct {
-	socket net.Conn
-
-	writer  *bufio.Writer
-	encoder *json.Encoder
-
-	reader  *bufio.Reader
-	scanner *bufio.Scanner
-
-	changesCh chan<- Change
+func (watchman *Watchman) Close() {
+	watchman.socket.Close()
 }
 
-type Change struct {
-	Version      string   `json:"version"`
-	Clock        string   `json:"clock"`
-	Files        []string `json:"files"`
-	Root         string   `json:"root"`
-	Subscription string   `json:"subscription"`
+func (watchman *Watchman) subscribe(watchRoot string) {
+	req := []interface{}{
+		"subscribe",
+		watchRoot,
+		watchman.subscription,
+		map[string]interface{}{
+			"expression": []interface{}{
+				"allof",
+				[]interface{}{"match", "**/*", "wholename", map[string]interface{}{"includedotfiles": true}},
+				[]interface{}{"not", []interface{}{"dirname", ".git"}},
+				[]interface{}{"not", []interface{}{"match", ".git", "wholename"}},
+				[]interface{}{"not", []interface{}{"dirname", ".idea"}},
+				[]interface{}{"not", []interface{}{"match", ".idea", "wholename"}},
+			},
+			"fields": []interface{}{"name", "type", "mode", "size", "exists"},
+		},
+	}
+
+	var resp struct {
+		Version   string `json:"version"`
+		Subscribe string `json:"subscribe"`
+	}
+	if !watchman.sendCommand(req, &resp) {
+		log.Fatalf("socket closed at subscribe")
+	}
 }
 
-type WatchProjectResp struct {
-	Version      string
-	Watch        string
-	RelativePath string `json: relative_path`
+func (watchman *Watchman) sendCommand(req interface{}, resp interface{}) bool {
+	watchman.encoder.Encode(req)
+	watchman.writer.Flush()
+	return watchman.read(resp)
 }
 
+func (watchman *Watchman) read(resp interface{}) bool {
+	ok := watchman.scanner.Scan()
+	if !ok {
+		return false // EOF
+	}
+	err := json.Unmarshal(watchman.scanner.Bytes(), resp)
+	if err != nil {
+		log.Fatalf("can't parse watch-project command response: %q", watchman.scanner.Text())
+	}
+	return true
+}
 
-//   const subscribe = ["subscribe", watch, subscriptionName, {
-//    expression: ["allof",
-//      ["match", "**/*", "wholename", {"includedotfiles": true}],
-//      // TODO: SHould have .robinignore
-//      ["not", ["dirname", ".git"]],
-//      ["not", ["match", ".git", "wholename"]],
-//      ["not", ["dirname", ".idea"]],
-//      ["not", ["match", ".idea", "wholename"]],
-//      // TODO: Should be configurable:
-//      ["not", ["dirname", "node_modules"]],
-//      ["not", ["match", "node_modules", "wholename"]],
-//      ["not", ["dirname", "dist"]],
-//      ["not", ["match", "dist", "wholename"]],
-//    ],
-//    fields: ["name", "type", "mode", "size", "exists"],
-//    relative_root: relativePath,
-//  }]
+func (watchman *Watchman) listenChanges(changesCh chan<- Change) {
+	go func() {
+		defer close(changesCh)
+		for {
+			change := Change{}
+			ok := watchman.read(&change)
+			if !ok {
+				return
+			}
+			changesCh <- change
+		}
+	}()
+}
 
-// {
-//  "version":   "1.6",
-//  "subscribe": "mysubscriptionname"
-// }
+func parse(data []byte, v interface{}) {
+	err := json.Unmarshal(data, v)
+	if err != nil {
+		log.Fatalf("can't parse: %v (%T)", err, err)
+	}
+}
+

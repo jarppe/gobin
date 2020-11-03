@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -53,12 +54,12 @@ func loadConfig() Config {
 	if config.identityfile == "" {
 		log.Fatal("Missing required parameter: identityfile")
 	}
-	if strings.HasPrefix(config.identityfile, "~/") {
-		config.identityfile = path.Join(os.Getenv("HOME"), m["identityfile"][1:])
-	}
+	config.identityfile = normalize(config.identityfile)
 	if _, err := os.Stat(config.identityfile); os.IsNotExist(err) {
 		log.Fatalf("can't find identity file: %s", config.identityfile)
 	}
+	config.source = normalize(config.source)
+	config.target = normalize(config.target)
 
 	return config
 }
@@ -188,4 +189,12 @@ func merge(maps ...map[string]string) map[string]string {
 		}
 	}
 	return result
+}
+
+func normalize(dir string) string {
+	if strings.HasPrefix(dir, "~/") {
+		return path.Join(os.Getenv("HOME"), dir[2:])
+	}
+	dir, _ = filepath.Abs(dir)
+	return dir
 }

@@ -41,7 +41,7 @@ func main() {
 	}()
 
 	var wg sync.WaitGroup
-	go sftp(&wg, config, changeCh, exitCh)
+	go sftp(&wg, config, changeCh)
 	go watchman(&wg, config, changeCh, exitCh)
 	wg.Add(2)
 

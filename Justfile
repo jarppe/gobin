@@ -6,16 +6,10 @@ ssh:
   @ssh jarppe-dev
 
 
-pack:
-  rm -fr ./dist
-  yarn install
-  yarn build
-  yarn install --prod
-  tar czf robin.tgz node_modules -C ./dist .
-  rm -fr ./dist
-  yarn install
+build:
+  #!/bin/bash
+  cd src
+  go build
 
-
-install: pack
-  rm -fr /opt/robin/*
-  tar -C /opt/robin -xvzf robin.tgz
+test: build
+  ./src/gobin -h jarppe-dev -s /Users/jarppe/swd/jarppe/gobin/example

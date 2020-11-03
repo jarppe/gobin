@@ -4,3 +4,5 @@
 /.envrc
 /dist
 /*.tgz
+/src/gobin
+/example
