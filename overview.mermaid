@@ -1,0 +1,30 @@
+flowchart TB
+  IDE(IDE)
+  FS(File System)
+  W(Watchman)
+  GL(Gobin)
+  GC(GobinC)
+  D(Docker daemon)
+  APP(Application)
+  CFS(Local FS)
+
+  subgraph LH [Local Host]
+    IDE --> FS
+    FS --> W
+    W --> GL
+  end
+
+
+  subgraph CH [Cloud Host]
+    GL -- SSL --> D
+  end
+
+  D --> DC
+
+  subgraph DC [Dev container]
+    GC --> CFS
+    GC --> APP
+    APP --> CFS
+  end
+
+  GL -- SSL --> GC
